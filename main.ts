@@ -449,6 +449,20 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
     }
     if (line.startsWith('@@')) {
       if (cur === null) throw new Exit2(`error: parse ${i + 1}`);
+      if (cur.delFile || cur.hdrNew === '/dev/null') {
+        // A deletion's hunks are not read (section 6): the section is already known to be a
+        // deletion from its header, so skip everything up to the next section start without
+        // reading any of it as a hunk — a malformed @@ line there cannot be a parse error.
+        let j = i + 1;
+        while (j < lines.length) {
+          const b = lines[j]!;
+          if (b === 'diff --git' || b.startsWith('diff --git ')) break;
+          if (b.startsWith('--- ') && (lines[j + 1] ?? '').startsWith('+++ ')) break;
+          j += 1;
+        }
+        i = j;
+        continue;
+      }
       const m = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(line);
       if (m === null) throw new Exit2(`error: parse ${i + 1}`);
       const entries: BodyEntry[] = [];
