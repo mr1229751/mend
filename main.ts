@@ -304,6 +304,7 @@ interface Section {
   renNew?: string;
   newFile: boolean;
   delFile: boolean;
+  sawHunk: boolean;
   hunks: Hunk[];
 }
 
@@ -371,12 +372,18 @@ function applyHunks(parts: FileParts, hunks: Hunk[], path: string, strict: boole
   return { br: parts.br, lines, finalBreak };
 }
 
-/** One unified section as an edit: a creation, a deletion, a move, or a change of the one path. */
-function sectionEdit(sec: Section, strict: boolean): Edit {
+/** The section's two paths and its kind: a creation (bullets tried in order), a deletion, else a change or a move. */
+function sectionKind(sec: Section): { oldPath: string | undefined; newPath: string | undefined; creation: boolean; deletion: boolean } {
   const oldPath = sec.hdrOld ?? sec.renOld ?? sec.diffOld;
   const newPath = sec.hdrNew ?? sec.renNew ?? sec.diffNew;
   const creation = oldPath === '/dev/null' || sec.newFile;
   const deletion = newPath === '/dev/null' || sec.delFile;
+  return { oldPath, newPath, creation, deletion };
+}
+
+/** One unified section as an edit: a creation, a deletion, a move, or a change of the one path. */
+function sectionEdit(sec: Section, strict: boolean): Edit {
+  const { oldPath, newPath, creation, deletion } = sectionKind(sec);
   return (tree) => {
     // Every path the edit names is checked for safety before anything else about it (section 10).
     if (oldPath !== undefined && oldPath !== '/dev/null' && !safePath(oldPath)) throw new Fail('unsafe', oldPath);
@@ -430,7 +437,7 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
   const sections: Section[] = [];
   let cur: Section | null = null;
   const open = (): Section => {
-    const s: Section = { newFile: false, delFile: false, hunks: [] };
+    const s: Section = { newFile: false, delFile: false, sawHunk: false, hunks: [] };
     sections.push(s);
     cur = s;
     return s;
@@ -449,7 +456,10 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
     }
     if (line.startsWith('@@')) {
       if (cur === null) throw new Exit2(`error: parse ${i + 1}`);
-      if (cur.delFile || cur.hdrNew === '/dev/null') {
+      // A hunk line ends the section's header, so nothing after it is read as header again.
+      cur.sawHunk = true;
+      const kind = sectionKind(cur);
+      if (kind.deletion && !kind.creation) {
         // A deletion's hunks are not read (section 6): the section is already known to be a
         // deletion from its header, so skip everything up to the next section start without
         // reading any of it as a hunk — a malformed @@ line there cannot be a parse error.
@@ -487,7 +497,7 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
     if (line.startsWith('--- ')) {
       const next = lines[i + 1] ?? '';
       if (next.startsWith('+++ ')) {
-        if (cur !== null && cur.hunks.length === 0 && cur.hdrOld === undefined) {
+        if (cur !== null && !cur.sawHunk && cur.hdrOld === undefined) {
           cur.hdrOld = headerPath(line);
           cur.hdrNew = headerPath(next);
         } else {
@@ -499,11 +509,11 @@ function unifiedEdits(lines: string[], strict: boolean): Edit[] {
         continue;
       }
       // A `--- ` line not followed by a `+++ ` line, inside a section's header, names the line after it.
-      if (cur !== null && cur.hunks.length === 0) throw new Exit2(`error: parse ${i + 2}`);
+      if (cur !== null && !cur.sawHunk) throw new Exit2(`error: parse ${i + 2}`);
       i += 1;
       continue;
     }
-    if (cur !== null && cur.hunks.length === 0) {
+    if (cur !== null && !cur.sawHunk) {
       if (line.startsWith('rename from ')) cur.renOld = trimSpaces(line.slice('rename from '.length));
       else if (line.startsWith('rename to ')) cur.renNew = trimSpaces(line.slice('rename to '.length));
       else if (line === 'new file mode' || line.startsWith('new file mode ')) cur.newFile = true;
